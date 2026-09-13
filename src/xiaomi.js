@@ -6,6 +6,12 @@ import {
 export const TOKEN_KEY = "mi_fitness_token";
 export const LOGIN_SESSION_KEY = "mi_fitness_login_session";
 
+const RELATIVE_UID_CACHE_KEY = "mi_health_first_relative_uid";
+const LATEST_CACHE_KEY = "mi_health_latest_cache";
+
+const RELATIVE_UID_TTL = 86400; // 亲友 UID 缓存 24 小时
+const LATEST_CACHE_TTL = 60;    // 最新健康数据缓存 60 秒
+
 const XIAOMI_QR_LOGIN_URL = "https://account.xiaomi.com/longPolling/loginUrl";
 const STS_HEALTH_URL = "https://sts-hlth.io.mi.com/healthapp/sts";
 const HEALTH_API_BASE = "https://hlth.io.mi.com";
@@ -293,23 +299,46 @@ function responseResult(response) {
 
 async function firstRelative(env, fetchImpl) {
   const token = await requireActiveToken(env);
+  const kv = requireKv(env);
+
+  // 先从 KV 读亲友 UID，避免每次都请求小米亲友列表
+  const cachedUid = await kv.get(RELATIVE_UID_CACHE_KEY);
+
+  if (cachedUid && /^\d+$/.test(cachedUid)) {
+    return { token, relativeUid: cachedUid };
+  }
+
+  // KV 没有，才向小米查询亲友列表
   const response = await encryptedRequest(
     fetchImpl,
     token,
     "GET",
     RELATIVES_LIST_PATH,
   );
+
   const relatives = responseResult(response).relative_list;
+
   if (!Array.isArray(relatives) || relatives.length === 0) {
     throw new XiaomiApiError("亲友列表为空");
   }
+
   const relativeUid = relatives[0]?.relative_uid;
+
   const validUid =
     (typeof relativeUid === "number" && Number.isFinite(relativeUid)) ||
     (typeof relativeUid === "string" && /^\d+$/.test(relativeUid));
+
   if (!validUid) {
     throw new XiaomiApiError("亲友列表第一项缺少有效 UID");
   }
+
+  // 存进 KV，24 小时后自动重新获取
+  await kv.put(
+    RELATIVE_UID_CACHE_KEY,
+    String(relativeUid),
+    { expirationTtl: RELATIVE_UID_TTL },
+  );
+
   return { token, relativeUid };
 }
 
@@ -322,7 +351,17 @@ function normalizeLatestItem(item) {
 }
 
 export async function getLatestHealth(env, fetchImpl = fetch) {
+  const kv = requireKv(env);
+
+  // 先看看过去 60 秒有没有查过
+  const cached = await kv.get(LATEST_CACHE_KEY, { type: "json" });
+
+  if (cached) {
+    return cached;
+  }
+
   const { token, relativeUid } = await firstRelative(env, fetchImpl);
+
   const response = await encryptedRequest(
     fetchImpl,
     token,
@@ -330,21 +369,24 @@ export async function getLatestHealth(env, fetchImpl = fetch) {
     RELATIVES_LATEST_PATH,
     { relative_uid: relativeUid },
   );
+
   const result = responseResult(response);
   const items = Array.isArray(result.data_list) ? result.data_list : [];
   const selected = {};
+
   const outputNames = {
     sleep: "sleep",
     heart_rate: "heart_rate",
     steps: "steps",
   };
+
   for (const item of items) {
     if (outputNames[item?.key]) {
       selected[outputNames[item.key]] = normalizeLatestItem(item);
     }
   }
 
-  return {
+  const output = {
     relative_uid: relativeUid,
     latest_data_time: Number(result.latest_data_time || 0),
     data: selected,
@@ -353,6 +395,15 @@ export async function getLatestHealth(env, fetchImpl = fetch) {
         ? "暂无睡眠、心率或步数数据（设备可能未佩戴或尚未同步）"
         : undefined,
   };
+
+  // 查询结果保存 60 秒
+  await kv.put(
+    LATEST_CACHE_KEY,
+    JSON.stringify(output),
+    { expirationTtl: LATEST_CACHE_TTL },
+  );
+
+  return output;
 }
 
 function cstTodayWindow(now, days) {

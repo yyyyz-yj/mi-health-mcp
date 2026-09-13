@@ -158,19 +158,7 @@ async function bearerAuthorized(request, expected) {
 }
 
 async function handleMcpRequest(request, env, fetchImpl) {
-  if (!env?.AUTH_TOKEN) {
-    return jsonResponse(
-      { error: "server misconfigured: AUTH_TOKEN not set" },
-      500,
-    );
-  }
-  if (!(await bearerAuthorized(request, env.AUTH_TOKEN))) {
-    return jsonResponse(
-      { error: "unauthorized" },
-      401,
-      { "WWW-Authenticate": "Bearer" },
-    );
-  }
+  
   if (request.method !== "POST") {
     return jsonResponse({ error: "method not allowed" }, 405, {
       Allow: "POST",

@@ -305,7 +305,7 @@ async function firstRelative(env, fetchImpl) {
   const cachedUid = await kv.get(RELATIVE_UID_CACHE_KEY);
 
   if (cachedUid && /^\d+$/.test(cachedUid)) {
-    return { token, relativeUid: cachedUid };
+   return { token, relativeUid: Number(cachedUid) };
   }
 
   // KV 没有，才向小米查询亲友列表
